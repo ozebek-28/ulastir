@@ -1,0 +1,18 @@
+{
+  "name": "sofor-takip-otomasyon",
+  "version": "1.0.0",
+  "description": "Şoför Performans ve Operasyon Takip Sistemi — Otomasyon Servisi",
+  "main": "otomasyon.js",
+  "scripts": {
+    "start": "node otomasyon.js",
+    "dev":   "node --watch otomasyon.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv":     "^16.4.5",
+    "node-cron":  "^3.0.3",
+    "node-fetch": "^2.7.0"
+  }
+}
