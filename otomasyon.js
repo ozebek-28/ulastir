@@ -1,18 +1,19 @@
 // ============================================================
-// Şoför Takip Sistemi — Node.js Otomasyon Servisi
+// Şoför Takip Sistemi — Node.js Otomasyon Servisi v2.0
 // ============================================================
-// Kurulum:
-//   npm install
+// v2.0 değişiklikleri:
+//  - Arvento SOAP Web Service entegrasyonu (GetVehicleStatus)
+//  - Plaka eşleştirmesi (GetLicensePlateNodeMappings) cache'li
+//  - ARVENTO_USERNAME + PIN1 + PIN2 ile auth
 //
-// Çalıştırma:
-//   npm start
-//
-// Ortam değişkenleri (.env dosyası — .env.example'a bakın):
+// Ortam değişkenleri (.env / Railway):
 //   SUPABASE_URL
 //   SUPABASE_KEY
-//   ARVENTO_API_KEY   (opsiyonel — yoksa simulation modunda çalışır)
-//   ARVENTO_API_URL   (opsiyonel)
-//   LOCATION_POLL_SECONDS (opsiyonel, default 30)
+//   ARVENTO_USERNAME      (yoksa simulation modu)
+//   ARVENTO_PIN1
+//   ARVENTO_PIN2
+//   ARVENTO_API_URL       (default: http://ws.arvento.com/v1/report.asmx)
+//   LOCATION_POLL_SECONDS (default: 30)
 // ============================================================
 
 require('dotenv').config();
@@ -22,23 +23,24 @@ const fetch = require('node-fetch');
 
 // ── Konfigürasyon ──────────────────────────────────────────
 const CONFIG = {
-  SUPABASE_URL:    process.env.SUPABASE_URL,
-  SUPABASE_KEY:    process.env.SUPABASE_KEY,
-  ARVENTO_API_URL: process.env.ARVENTO_API_URL || 'https://web.arvento.com/rest',
-  ARVENTO_API_KEY: process.env.ARVENTO_API_KEY || null,
+  SUPABASE_URL:     process.env.SUPABASE_URL,
+  SUPABASE_KEY:     process.env.SUPABASE_KEY,
 
-  // Mod: 'simulation' = test, 'live' = gerçek Arvento
-  MODE: process.env.ARVENTO_API_KEY ? 'live' : 'simulation',
+  ARVENTO_API_URL:  process.env.ARVENTO_API_URL  || 'http://ws.arvento.com/v1/report.asmx',
+  ARVENTO_USERNAME: process.env.ARVENTO_USERNAME || null,
+  ARVENTO_PIN1:     process.env.ARVENTO_PIN1     || null,
+  ARVENTO_PIN2:     process.env.ARVENTO_PIN2     || null,
 
-  // Kaç saniyede bir Arvento'dan konum çekilsin
+  // Mod: USERNAME+PIN1+PIN2'nin üçü de varsa LIVE, yoksa SIMULATION
+  MODE: (process.env.ARVENTO_USERNAME && process.env.ARVENTO_PIN1 && process.env.ARVENTO_PIN2)
+    ? 'live'
+    : 'simulation',
+
   LOCATION_POLL_SECONDS: parseInt(process.env.LOCATION_POLL_SECONDS || '30', 10),
 };
 
-// Kritik env var'lar yoksa hata ver
 if (!CONFIG.SUPABASE_URL || !CONFIG.SUPABASE_KEY) {
   console.error('❌ HATA: SUPABASE_URL ve SUPABASE_KEY environment variable olarak tanımlanmalı.');
-  console.error('   .env dosyası oluşturun veya Railway/Vercel panelinden ekleyin.');
-  console.error('   Örnek için .env.example dosyasına bakın.');
   process.exit(1);
 }
 
@@ -63,7 +65,6 @@ async function sb(path, opts = {}) {
   return text ? JSON.parse(text) : [];
 }
 
-// ── Supabase RPC çağrısı ───────────────────────────────────
 async function sbRpc(funcName) {
   const res = await fetch(`${CONFIG.SUPABASE_URL}/rest/v1/rpc/${funcName}`, {
     method:  'POST',
@@ -74,7 +75,7 @@ async function sbRpc(funcName) {
   return res.json().catch(() => null);
 }
 
-// ── Haversine mesafe ───────────────────────────────────────
+// ── Haversine ──────────────────────────────────────────────
 function haversineMeters(lat1, lng1, lat2, lng2) {
   const R = 6371000;
   const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -83,15 +84,17 @@ function haversineMeters(lat1, lng1, lat2, lng2) {
             Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLng/2)**2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
-
 function isInZone(lat, lng, zone) {
   return haversineMeters(lat, lng, zone.latitude, zone.longitude) <= zone.radius_meters;
 }
 
 // ── Cache ──────────────────────────────────────────────────
-let zonesCache   = [];
-let driversCache = [];
-let cacheLoadedAt = null;
+let zonesCache        = [];
+let driversCache      = [];
+let cacheLoadedAt     = null;
+// Arvento: Device_No → LicensePlate eşleşmesi
+let plateByDeviceNo   = new Map();
+let plateMapLoadedAt  = null;
 
 async function refreshCache() {
   zonesCache   = await sb('zones?is_active=eq.true');
@@ -100,10 +103,100 @@ async function refreshCache() {
   console.log(`[Cache] ${zonesCache.length} zone, ${driversCache.length} şoför yüklendi`);
 }
 
-// ── Arvento API ────────────────────────────────────────────
+// ── Arvento SOAP yardımcıları ──────────────────────────────
+// SOAP zarfını oluştur
+function buildSoapEnvelope(method, params) {
+  const inner = Object.entries(params)
+    .map(([k, v]) => `<${k}>${escapeXml(v ?? '')}</${k}>`)
+    .join('');
+  return `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <soap:Body>
+    <${method} xmlns="http://tempuri.org/">
+      ${inner}
+    </${method}>
+  </soap:Body>
+</soap:Envelope>`;
+}
+
+function escapeXml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+// Çok basit XML parse — bir tag içindeki değeri yakalar (tüm occurences)
+function xmlTagValues(xml, tag) {
+  const re = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'g');
+  const out = [];
+  let m;
+  while ((m = re.exec(xml)) !== null) out.push(decodeXml(m[1]));
+  return out;
+}
+function decodeXml(s) {
+  return s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+// Arvento'ya SOAP request at, raw XML döner
+async function arventoCall(method, extraParams = {}) {
+  const params = {
+    Username: CONFIG.ARVENTO_USERNAME,
+    PIN1:     CONFIG.ARVENTO_PIN1,
+    PIN2:     CONFIG.ARVENTO_PIN2,
+    ...extraParams,
+  };
+  const body = buildSoapEnvelope(method, params);
+  const res = await fetch(CONFIG.ARVENTO_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'text/xml; charset=utf-8',
+      'SOAPAction':   `"http://tempuri.org/${method}"`,
+    },
+    body,
+  });
+  if (!res.ok) throw new Error(`Arvento ${method} HTTP ${res.status}`);
+  const xml = await res.text();
+  // Basit hata kontrolü
+  if (xml.includes('<faultstring>')) {
+    const fault = xmlTagValues(xml, 'faultstring')[0] || 'unknown';
+    throw new Error(`Arvento SOAP Fault: ${fault}`);
+  }
+  return xml;
+}
+
+// Device_No → Plaka eşleşmesini çek (15 dakikada bir yenilenir)
+async function refreshPlateMapping() {
+  const xml = await arventoCall('GetLicensePlateNodeMappings', { Language: '1' });
+  // Her row'da Device_x0020_No ve License_x0020_Plate var
+  // XML iç içe: <Table>...<Device_x0020_No>X</Device_x0020_No><License_x0020_Plate>Y</License_x0020_Plate>...</Table>
+  const rows = xml.split(/<Table[^>]*>/).slice(1);
+  const map = new Map();
+  for (const row of rows) {
+    const devs  = xmlTagValues(row, 'Device_x0020_No');
+    const plates = xmlTagValues(row, 'License_x0020_Plate');
+    if (devs[0] && plates[0]) {
+      map.set(String(devs[0]).trim(), String(plates[0]).trim());
+    }
+  }
+  plateByDeviceNo  = map;
+  plateMapLoadedAt = new Date();
+  console.log(`[Arvento] Plaka eşleşmesi: ${map.size} araç`);
+}
+
+// ── Arvento: Araç konumlarını al ───────────────────────────
 async function fetchArventoPositions() {
   if (CONFIG.MODE === 'simulation') {
-    // Simülasyon: rastgele araç konumları üret
+    // Simülasyon — eskisi gibi
     return driversCache
       .filter(d => d.vehicle_plate)
       .map(d => {
@@ -129,21 +222,48 @@ async function fetchArventoPositions() {
       });
   }
 
-  // LIVE: Arvento REST API
-  const res = await fetch(`${CONFIG.ARVENTO_API_URL}/vehicles/positions`, {
-    headers: { 'Authorization': 'Bearer ' + CONFIG.ARVENTO_API_KEY },
-  });
-  if (!res.ok) throw new Error('Arvento API hatası: ' + res.status);
-  const data = await res.json();
+  // ── LIVE: Arvento GetVehicleStatus ──
+  // Plaka eşleşmesi 15 dakikadan eskiyse yenile
+  if (!plateMapLoadedAt || Date.now() - plateMapLoadedAt > 15 * 60 * 1000) {
+    try {
+      await refreshPlateMapping();
+    } catch (e) {
+      console.error('[Arvento] Plaka eşleşmesi çekilemedi:', e.message);
+    }
+  }
 
-  return (data.vehicles || data.data || []).map(v => ({
-    plate:    v.plate || v.vehiclePlate || v.licensePlate,
-    driverId: null,
-    lat:      parseFloat(v.latitude  || v.lat),
-    lng:      parseFloat(v.longitude || v.lng),
-    speed:    parseFloat(v.speed || 0),
-    at:       v.timestamp || new Date().toISOString(),
-  }));
+  const xml = await arventoCall('GetVehicleStatus', { Language: '1' });
+
+  // Response: her araç için bir <Table> bloğu
+  const rows = xml.split(/<Table[^>]*>/).slice(1);
+  const out = [];
+  for (const row of rows) {
+    const deviceNo = xmlTagValues(row, 'Device_x0020_ID')[0]
+                  || xmlTagValues(row, 'Device_x0020_No')[0];
+    const lat   = parseFloat(xmlTagValues(row, 'Latitude')[0]  || 'NaN');
+    const lng   = parseFloat(xmlTagValues(row, 'Longitude')[0] || xmlTagValues(row, 'Language')[0] || 'NaN');
+    const speed = parseFloat(xmlTagValues(row, 'Speed')[0]     || '0');
+    const dt    = xmlTagValues(row, 'GMT_x0020_Date_x002F_Time')[0];
+
+    if (!deviceNo || isNaN(lat) || isNaN(lng)) continue;
+
+    const plate = plateByDeviceNo.get(String(deviceNo).trim());
+    if (!plate) {
+      // Plaka bulunamadı — device_no ile devam et, ama sistem plakaya göre çalışıyor
+      // O yüzden bu aracı atla
+      continue;
+    }
+
+    out.push({
+      plate,
+      driverId: null, // Arvento driver eşleşmesi istersek GetDriverNodeMappings ile ayrıca çekilir
+      lat,
+      lng,
+      speed: isNaN(speed) ? 0 : speed,
+      at: dt ? new Date(dt).toISOString() : new Date().toISOString(),
+    });
+  }
+  return out;
 }
 
 // ── Sefer oluştur ──────────────────────────────────────────
@@ -163,6 +283,10 @@ async function createTrip({ plate, driverId, originZoneId, destZoneId, startedAt
   if (driverId) {
     const drv = driversCache.find(d => d.id === driverId);
     routeId = drv?.route_id || null;
+  } else {
+    // Plakaya göre şoför bul
+    const drv = driversCache.find(d => d.vehicle_plate === plate);
+    if (drv) routeId = drv.route_id || null;
   }
 
   const durationHr = startedAt && endedAt
@@ -305,13 +429,10 @@ async function pollLocations() {
   }
 }
 
-// ── Sağlık kontrolü (Railway/Render için opsiyonel HTTP endpoint) ──
-// Platform healthcheck isterse diye minimal HTTP server açar.
-// Port yoksa açılmaz, sorun çıkarmaz.
+// ── Health endpoint ────────────────────────────────────────
 function startHealthServer() {
   const port = process.env.PORT;
   if (!port) return;
-
   const http = require('http');
   http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -320,7 +441,7 @@ function startHealthServer() {
       mode: CONFIG.MODE,
       zones: zonesCache.length,
       drivers: driversCache.length,
-      lastPoll: cacheLoadedAt,
+      arventoPlateMap: plateByDeviceNo.size,
     }));
   }).listen(port, () => {
     console.log(`[Health] HTTP server port ${port} üzerinde dinliyor`);
@@ -330,9 +451,13 @@ function startHealthServer() {
 // ── Servis başlatma ────────────────────────────────────────
 async function start() {
   console.log('═══════════════════════════════════════');
-  console.log(' Şoför Takip — Otomasyon Servisi v1.0');
+  console.log(' Şoför Takip — Otomasyon Servisi v2.0');
   console.log(`  Mod: ${CONFIG.MODE.toUpperCase()}`);
   console.log(`  Supabase: ${CONFIG.SUPABASE_URL}`);
+  if (CONFIG.MODE === 'live') {
+    console.log(`  Arvento:  ${CONFIG.ARVENTO_API_URL}`);
+    console.log(`  Kullanıcı: ${CONFIG.ARVENTO_USERNAME}`);
+  }
   console.log('═══════════════════════════════════════');
 
   await refreshCache();
