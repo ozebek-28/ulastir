@@ -174,23 +174,87 @@ async function arventoCall(method, extraParams = {}) {
   return xml;
 }
 
+// DEBUG: İlk çağrıda ham XML'i logla (format anlamak için)
+let debugArventoLogged = { GetLicensePlateNodeMappings: false, GetVehicleStatus: false, GetVehicleInfo: false };
+async function arventoCallDebug(method, extraParams = {}) {
+  const xml = await arventoCall(method, extraParams);
+  if (!debugArventoLogged[method]) {
+    debugArventoLogged[method] = true;
+    console.log(`\n===== ARVENTO DEBUG: ${method} =====`);
+    console.log(xml.substring(0, 3000));
+    console.log(`===== END ${method} =====\n`);
+  }
+  return xml;
+}
+
 // Device_No → Plaka eşleşmesini çek (15 dakikada bir yenilenir)
 async function refreshPlateMapping() {
-  const xml = await arventoCall('GetLicensePlateNodeMappings', { Language: '1' });
-  // Her row'da Device_x0020_No ve License_x0020_Plate var
-  // XML iç içe: <Table>...<Device_x0020_No>X</Device_x0020_No><License_x0020_Plate>Y</License_x0020_Plate>...</Table>
-  const rows = xml.split(/<Table[^>]*>/).slice(1);
+  // GetLicensePlateNodeMappings dene
+  let xml;
+  try {
+    xml = await arventoCallDebug('GetLicensePlateNodeMappings', { Language: '1' });
+  } catch (e) {
+    console.error('[Arvento] GetLicensePlateNodeMappings hata:', e.message);
+    xml = '';
+  }
+
+  // Fallback: GetVehicleInfo ve GetNodes birleştirerek eşleşme kur
+  // (GetLicensePlateNodeMappings bazı hesaplarda boş dönebilir)
   const map = new Map();
+
+  // Farklı tag isimlerini dene (Arvento versiyona göre değişir)
+  const possibleDeviceTags = ['Device_x0020_No', 'Device_x0020_ID', 'Node', 'Device_No', 'DeviceNo'];
+  const possiblePlateTags  = ['License_x0020_Plate', 'LicensePlate', 'License_Plate'];
+
+  const rows = xml ? xml.split(/<Table[^>]*>/).slice(1) : [];
   for (const row of rows) {
-    const devs  = xmlTagValues(row, 'Device_x0020_No');
-    const plates = xmlTagValues(row, 'License_x0020_Plate');
-    if (devs[0] && plates[0]) {
-      map.set(String(devs[0]).trim(), String(plates[0]).trim());
+    let dev, plate;
+    for (const t of possibleDeviceTags) {
+      const v = xmlTagValues(row, t)[0];
+      if (v) { dev = v; break; }
+    }
+    for (const t of possiblePlateTags) {
+      const v = xmlTagValues(row, t)[0];
+      if (v) { plate = v; break; }
+    }
+    if (dev && plate) {
+      map.set(String(dev).trim(), String(plate).trim());
     }
   }
+
+  // Hâlâ boşsa GetNodes ile dene
+  if (map.size === 0) {
+    try {
+      const xml2 = await arventoCallDebug('GetNodes', { Group: '' });
+      const rows2 = xml2.split(/<Table[^>]*>/).slice(1);
+      for (const row of rows2) {
+        let dev, plate;
+        for (const t of possibleDeviceTags) {
+          const v = xmlTagValues(row, t)[0];
+          if (v) { dev = v; break; }
+        }
+        for (const t of possiblePlateTags) {
+          const v = xmlTagValues(row, t)[0];
+          if (v) { plate = v; break; }
+        }
+        if (dev && plate) map.set(String(dev).trim(), String(plate).trim());
+      }
+    } catch (e) {
+      console.error('[Arvento] GetNodes hata:', e.message);
+    }
+  }
+
   plateByDeviceNo  = map;
   plateMapLoadedAt = new Date();
   console.log(`[Arvento] Plaka eşleşmesi: ${map.size} araç`);
+  if (map.size > 0) {
+    // İlk 3 eşleşmeyi göster
+    let i = 0;
+    for (const [dev, pl] of map) {
+      console.log(`[Arvento]   ${dev} → ${pl}`);
+      if (++i >= 3) break;
+    }
+  }
 }
 
 // ── Arvento: Araç konumlarını al ───────────────────────────
@@ -232,36 +296,62 @@ async function fetchArventoPositions() {
     }
   }
 
-  const xml = await arventoCall('GetVehicleStatus', { Language: '1' });
+  const xml = await arventoCallDebug('GetVehicleStatus', { Language: '1' });
 
   // Response: her araç için bir <Table> bloğu
   const rows = xml.split(/<Table[^>]*>/).slice(1);
   const out = [];
-  for (const row of rows) {
-    const deviceNo = xmlTagValues(row, 'Device_x0020_ID')[0]
-                  || xmlTagValues(row, 'Device_x0020_No')[0];
-    const lat   = parseFloat(xmlTagValues(row, 'Latitude')[0]  || 'NaN');
-    const lng   = parseFloat(xmlTagValues(row, 'Longitude')[0] || xmlTagValues(row, 'Language')[0] || 'NaN');
-    const speed = parseFloat(xmlTagValues(row, 'Speed')[0]     || '0');
-    const dt    = xmlTagValues(row, 'GMT_x0020_Date_x002F_Time')[0];
+  let skippedNoPlate = 0;
+  let skippedNoDevice = 0;
 
-    if (!deviceNo || isNaN(lat) || isNaN(lng)) continue;
+  // Arvento PDF'e göre tag isimleri farklı sürümlerde değişebiliyor
+  const deviceTags = ['Device_x0020_No', 'Device_x0020_ID', 'Node', 'Device_No', 'DeviceNo'];
+  const latTags    = ['Latitude', 'Lat'];
+  const lngTags    = ['Longitude', 'Lng', 'Long'];
+  const speedTags  = ['Speed', 'Speed_x0020_km_x002F_h'];
+  const dtTags     = ['GMT_x0020_Date_x002F_Time', 'GMT_Date_Time', 'Date_x002F_Time', 'LocalDateTime'];
+
+  const pickFirst = (row, tags) => {
+    for (const t of tags) {
+      const v = xmlTagValues(row, t)[0];
+      if (v !== undefined && v !== '') return v;
+    }
+    return undefined;
+  };
+
+  for (const row of rows) {
+    const deviceNo = pickFirst(row, deviceTags);
+    const latRaw   = pickFirst(row, latTags);
+    const lngRaw   = pickFirst(row, lngTags);
+    const speedRaw = pickFirst(row, speedTags);
+    const dt       = pickFirst(row, dtTags);
+
+    if (!deviceNo) { skippedNoDevice++; continue; }
+
+    const lat   = parseFloat(latRaw);
+    const lng   = parseFloat(lngRaw);
+    const speed = parseFloat(speedRaw || '0');
+
+    if (isNaN(lat) || isNaN(lng)) continue;
 
     const plate = plateByDeviceNo.get(String(deviceNo).trim());
     if (!plate) {
-      // Plaka bulunamadı — device_no ile devam et, ama sistem plakaya göre çalışıyor
-      // O yüzden bu aracı atla
+      skippedNoPlate++;
       continue;
     }
 
     out.push({
       plate,
-      driverId: null, // Arvento driver eşleşmesi istersek GetDriverNodeMappings ile ayrıca çekilir
+      driverId: null,
       lat,
       lng,
       speed: isNaN(speed) ? 0 : speed,
       at: dt ? new Date(dt).toISOString() : new Date().toISOString(),
     });
+  }
+
+  if (skippedNoPlate > 0 || skippedNoDevice > 0) {
+    console.log(`[Arvento] Atlanan: ${skippedNoPlate} plakasız, ${skippedNoDevice} cihazsız`);
   }
   return out;
 }
@@ -451,7 +541,7 @@ function startHealthServer() {
 // ── Servis başlatma ────────────────────────────────────────
 async function start() {
   console.log('═══════════════════════════════════════');
-  console.log(' Şoför Takip — Otomasyon Servisi v2.0');
+  console.log(' Şoför Takip — Otomasyon Servisi v2.1');
   console.log(`  Mod: ${CONFIG.MODE.toUpperCase()}`);
   console.log(`  Supabase: ${CONFIG.SUPABASE_URL}`);
   if (CONFIG.MODE === 'live') {
