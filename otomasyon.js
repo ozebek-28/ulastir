@@ -1,19 +1,23 @@
 // ============================================================
-// Şoför Takip Sistemi — Node.js Otomasyon Servisi v2.0
+// Şoför Takip Sistemi — Node.js Otomasyon Servisi v2.3
 // ============================================================
-// v2.0 değişiklikleri:
+// v2.3 değişiklikleri:
+//  - Simulation modu tamamen kaldırıldı
+//  - Arvento env'leri eksikse servis açılmıyor (fail-fast)
+//
+// v2.0 özellikleri:
 //  - Arvento SOAP Web Service entegrasyonu (GetVehicleStatus)
 //  - Plaka eşleştirmesi (GetLicensePlateNodeMappings) cache'li
 //  - ARVENTO_USERNAME + PIN1 + PIN2 ile auth
 //
 // Ortam değişkenleri (.env / Railway):
-//   SUPABASE_URL
-//   SUPABASE_KEY
-//   ARVENTO_USERNAME      (yoksa simulation modu)
-//   ARVENTO_PIN1
-//   ARVENTO_PIN2
-//   ARVENTO_API_URL       (default: http://ws.arvento.com/v1/report.asmx)
-//   LOCATION_POLL_SECONDS (default: 30)
+//   SUPABASE_URL          (zorunlu)
+//   SUPABASE_KEY          (zorunlu)
+//   ARVENTO_USERNAME      (zorunlu)
+//   ARVENTO_PIN1          (zorunlu)
+//   ARVENTO_PIN2          (zorunlu)
+//   ARVENTO_API_URL       (opsiyonel, default: http://ws.arvento.com/v1/report.asmx)
+//   LOCATION_POLL_SECONDS (opsiyonel, default: 30)
 // ============================================================
 
 require('dotenv').config();
@@ -27,20 +31,25 @@ const CONFIG = {
   SUPABASE_KEY:     process.env.SUPABASE_KEY,
 
   ARVENTO_API_URL:  process.env.ARVENTO_API_URL  || 'http://ws.arvento.com/v1/report.asmx',
-  ARVENTO_USERNAME: process.env.ARVENTO_USERNAME || null,
-  ARVENTO_PIN1:     process.env.ARVENTO_PIN1     || null,
-  ARVENTO_PIN2:     process.env.ARVENTO_PIN2     || null,
-
-  // Mod: USERNAME+PIN1+PIN2'nin üçü de varsa LIVE, yoksa SIMULATION
-  MODE: (process.env.ARVENTO_USERNAME && process.env.ARVENTO_PIN1 && process.env.ARVENTO_PIN2)
-    ? 'live'
-    : 'simulation',
+  ARVENTO_USERNAME: process.env.ARVENTO_USERNAME,
+  ARVENTO_PIN1:     process.env.ARVENTO_PIN1,
+  ARVENTO_PIN2:     process.env.ARVENTO_PIN2,
 
   LOCATION_POLL_SECONDS: parseInt(process.env.LOCATION_POLL_SECONDS || '30', 10),
 };
 
-if (!CONFIG.SUPABASE_URL || !CONFIG.SUPABASE_KEY) {
-  console.error('❌ HATA: SUPABASE_URL ve SUPABASE_KEY environment variable olarak tanımlanmalı.');
+// ── Env doğrulama — fail-fast ──────────────────────────────
+const requiredEnv = [
+  ['SUPABASE_URL',     CONFIG.SUPABASE_URL],
+  ['SUPABASE_KEY',     CONFIG.SUPABASE_KEY],
+  ['ARVENTO_USERNAME', CONFIG.ARVENTO_USERNAME],
+  ['ARVENTO_PIN1',     CONFIG.ARVENTO_PIN1],
+  ['ARVENTO_PIN2',     CONFIG.ARVENTO_PIN2],
+];
+const missing = requiredEnv.filter(([, v]) => !v).map(([k]) => k);
+if (missing.length) {
+  console.error(`❌ HATA: Şu environment variable(lar) tanımlı değil: ${missing.join(', ')}`);
+  console.error('   Railway → Variables sekmesinden ekleyin ve servisi yeniden başlatın.');
   process.exit(1);
 }
 
@@ -175,7 +184,7 @@ async function arventoCall(method, extraParams = {}) {
 }
 
 // DEBUG: İlk çağrıda ham XML'i logla (format anlamak için)
-let debugArventoLogged = { GetLicensePlateNodeMappings: false, GetVehicleStatus: false, GetVehicleInfo: false };
+let debugArventoLogged = { GetLicensePlateNodeMappings: false, GetVehicleStatus: false, GetVehicleInfo: false, GetNodes: false };
 async function arventoCallDebug(method, extraParams = {}) {
   const xml = await arventoCall(method, extraParams);
   if (!debugArventoLogged[method]) {
@@ -259,34 +268,6 @@ async function refreshPlateMapping() {
 
 // ── Arvento: Araç konumlarını al ───────────────────────────
 async function fetchArventoPositions() {
-  if (CONFIG.MODE === 'simulation') {
-    // Simülasyon — eskisi gibi
-    return driversCache
-      .filter(d => d.vehicle_plate)
-      .map(d => {
-        const zone = zonesCache[Math.floor(Math.random() * (zonesCache.length + 2))];
-        if (zone && Math.random() > 0.3) {
-          return {
-            plate:    d.vehicle_plate,
-            driverId: d.id,
-            lat:      parseFloat(zone.latitude)  + (Math.random()-0.5) * 0.001,
-            lng:      parseFloat(zone.longitude) + (Math.random()-0.5) * 0.001,
-            speed:    Math.round(Math.random() * 10),
-            at:       new Date().toISOString(),
-          };
-        }
-        return {
-          plate:    d.vehicle_plate,
-          driverId: d.id,
-          lat:      39.9 + Math.random() * 1,
-          lng:      32.8 + Math.random() * 1,
-          speed:    Math.round(Math.random() * 80),
-          at:       new Date().toISOString(),
-        };
-      });
-  }
-
-  // ── LIVE: Arvento GetVehicleStatus ──
   // Plaka eşleşmesi 15 dakikadan eskiyse yenile
   if (!plateMapLoadedAt || Date.now() - plateMapLoadedAt > 15 * 60 * 1000) {
     try {
@@ -528,7 +509,6 @@ function startHealthServer() {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'ok',
-      mode: CONFIG.MODE,
       zones: zonesCache.length,
       drivers: driversCache.length,
       arventoPlateMap: plateByDeviceNo.size,
@@ -541,13 +521,10 @@ function startHealthServer() {
 // ── Servis başlatma ────────────────────────────────────────
 async function start() {
   console.log('═══════════════════════════════════════');
-  console.log(' Şoför Takip — Otomasyon Servisi v2.2');
-  console.log(`  Mod: ${CONFIG.MODE.toUpperCase()}`);
-  console.log(`  Supabase: ${CONFIG.SUPABASE_URL}`);
-  if (CONFIG.MODE === 'live') {
-    console.log(`  Arvento:  ${CONFIG.ARVENTO_API_URL}`);
-    console.log(`  Kullanıcı: ${CONFIG.ARVENTO_USERNAME}`);
-  }
+  console.log(' Şoför Takip — Otomasyon Servisi v2.3');
+  console.log(`  Supabase:  ${CONFIG.SUPABASE_URL}`);
+  console.log(`  Arvento:   ${CONFIG.ARVENTO_API_URL}`);
+  console.log(`  Kullanıcı: ${CONFIG.ARVENTO_USERNAME}`);
   console.log('═══════════════════════════════════════');
 
   await refreshCache();
