@@ -18,7 +18,7 @@ Araç konumlarını takip eder, zone giriş/çıkışlarını yakalar, otomatik 
                             └──────────────────┘
 ```
 
-Arvento API key'i yoksa **simulation** modunda çalışır: şoförlerin plakalarını alır, zone'lar arasında rastgele konumlar üretir, tüm pipeline'ı (zone event → trip oluşturma → skor) canlı ortamda olduğu gibi test eder.
+Arvento credential'ları (USERNAME + PIN1 + PIN2) zorunludur. Üçünden biri eksikse servis açılmaz (fail-fast).
 
 ## Gerekli Environment Variables
 
@@ -26,8 +26,10 @@ Arvento API key'i yoksa **simulation** modunda çalışır: şoförlerin plakala
 |----------|---------|----------|
 | `SUPABASE_URL` | ✅ | `https://xxx.supabase.co` |
 | `SUPABASE_KEY` | ✅ | Supabase anon key |
-| `ARVENTO_API_KEY` | ❌ | Yoksa simulation modu |
-| `ARVENTO_API_URL` | ❌ | Default: `https://web.arvento.com/rest` |
+| `ARVENTO_USERNAME` | ✅ | Arvento SOAP kullanıcı adı |
+| `ARVENTO_PIN1` | ✅ | Arvento PIN1 |
+| `ARVENTO_PIN2` | ✅ | Arvento PIN2 |
+| `ARVENTO_API_URL` | ❌ | Default: `http://ws.arvento.com/v1/report.asmx` |
 | `LOCATION_POLL_SECONDS` | ❌ | Default: `30` |
 
 ## Lokal Test
@@ -35,7 +37,8 @@ Arvento API key'i yoksa **simulation** modunda çalışır: şoförlerin plakala
 ```bash
 npm install
 cp .env.example .env
-# .env dosyasını aç, SUPABASE_URL ve SUPABASE_KEY'i doldur
+# .env dosyasını aç: SUPABASE_URL, SUPABASE_KEY ve
+# ARVENTO_USERNAME, ARVENTO_PIN1, ARVENTO_PIN2 zorunludur
 npm start
 ```
 
@@ -43,9 +46,10 @@ Konsol çıktısında şunu görmelisin:
 
 ```
 ═══════════════════════════════════════
- Şoför Takip — Otomasyon Servisi v1.0
-  Mod: SIMULATION
-  Supabase: https://xxx.supabase.co
+ Şoför Takip — Otomasyon Servisi v2.3
+  Supabase:  https://xxx.supabase.co
+  Arvento:   http://ws.arvento.com/v1/report.asmx
+  Kullanıcı: <ARVENTO_USERNAME>
 ═══════════════════════════════════════
 [Cache] 4 zone, 8 şoför yüklendi
 [Zamanlayıcı] Konum polling: her 30s
@@ -80,7 +84,9 @@ git push -u origin main
 4. **Variables** sekmesine git, şunları ekle:
    - `SUPABASE_URL`
    - `SUPABASE_KEY`
-   - (Arvento key gelince) `ARVENTO_API_KEY`
+   - `ARVENTO_USERNAME`
+   - `ARVENTO_PIN1`
+   - `ARVENTO_PIN2`
 5. **Deployments** sekmesinden logları izle
 
 ### 3. Logları İzleme
@@ -110,7 +116,7 @@ Bu servis çalışırken Supabase tarafında `pg_cron` de paralel çalışır; y
 ## Güvenlik Notu
 
 - Supabase `anon` key tarayıcıdan da kullanılabilen public bir key. Ama yine de git'e gömülmemeli — RLS politikaları değiştiğinde veya yanlış key'i paylaşmamak için.
-- Arvento key geldiğinde de **kesinlikle** environment variable olarak ekleyin, koda yazmayın.
+- Arvento credential'ları (`ARVENTO_USERNAME`, `ARVENTO_PIN1`, `ARVENTO_PIN2`) **kesinlikle** environment variable olarak verilmeli, koda yazmayın.
 
 ## Sorun Giderme
 
