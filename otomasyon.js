@@ -101,7 +101,8 @@ function isInZone(lat, lng, zone) {
 let zonesCache        = [];
 let driversCache      = [];
 let cacheLoadedAt     = null;
-// Arvento: Device_No → LicensePlate eşleşmesi
+// Arvento: Device_No → { plate, group } eşleşmesi
+// group ileride filtreleme için kullanılır (BİNEK ARAÇLAR, İŞ MAKİNALARI, ASSAN LİMAN gibi)
 let plateByDeviceNo   = new Map();
 let plateMapLoadedAt  = null;
 
@@ -154,6 +155,13 @@ function decodeXml(s) {
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
     .replace(/&amp;/g, '&');
+}
+
+// Arvento DataSet/DiffGram cevapları sürüme göre <Table> ya da <T diffgr:id="T1" ...> kullanır.
+// Lookahead tag adının tam "Table" veya "T" olmasını garanti eder (TestData/Title vb. yakalanmaz).
+function splitArventoRows(xml) {
+  if (!xml) return [];
+  return xml.split(/<(?:Table|T)(?=\s|>)/).slice(1);
 }
 
 // Arvento'ya SOAP request at, raw XML döner
@@ -214,40 +222,39 @@ async function refreshPlateMapping() {
   // Farklı tag isimlerini dene (Arvento versiyona göre değişir)
   const possibleDeviceTags = ['Device_x0020_No', 'Device_x0020_ID', 'Node', 'Device_No', 'DeviceNo'];
   const possiblePlateTags  = ['License_x0020_Plate', 'LicensePlate', 'License_Plate'];
+  const possibleGroupTags  = ['NodeGroup', 'Node_x0020_Group', 'Group_x0020_Name', 'Group'];
 
-  const rows = xml ? xml.split(/<Table[^>]*>/).slice(1) : [];
-  for (const row of rows) {
-    let dev, plate;
-    for (const t of possibleDeviceTags) {
-      const v = xmlTagValues(row, t)[0];
-      if (v) { dev = v; break; }
+  const ingestRows = (rows) => {
+    for (const row of rows) {
+      let dev, plate, group;
+      for (const t of possibleDeviceTags) {
+        const v = xmlTagValues(row, t)[0];
+        if (v) { dev = v; break; }
+      }
+      for (const t of possiblePlateTags) {
+        const v = xmlTagValues(row, t)[0];
+        if (v) { plate = v; break; }
+      }
+      for (const t of possibleGroupTags) {
+        const v = xmlTagValues(row, t)[0];
+        if (v) { group = v; break; }
+      }
+      if (dev && plate) {
+        map.set(String(dev).trim(), {
+          plate: String(plate).trim(),
+          group: group ? String(group).trim() : null,
+        });
+      }
     }
-    for (const t of possiblePlateTags) {
-      const v = xmlTagValues(row, t)[0];
-      if (v) { plate = v; break; }
-    }
-    if (dev && plate) {
-      map.set(String(dev).trim(), String(plate).trim());
-    }
-  }
+  };
+
+  ingestRows(splitArventoRows(xml));
 
   // Hâlâ boşsa GetNodes ile dene
   if (map.size === 0) {
     try {
       const xml2 = await arventoCallDebug('GetNodes', { Group: '' });
-      const rows2 = xml2.split(/<Table[^>]*>/).slice(1);
-      for (const row of rows2) {
-        let dev, plate;
-        for (const t of possibleDeviceTags) {
-          const v = xmlTagValues(row, t)[0];
-          if (v) { dev = v; break; }
-        }
-        for (const t of possiblePlateTags) {
-          const v = xmlTagValues(row, t)[0];
-          if (v) { plate = v; break; }
-        }
-        if (dev && plate) map.set(String(dev).trim(), String(plate).trim());
-      }
+      ingestRows(splitArventoRows(xml2));
     } catch (e) {
       console.error('[Arvento] GetNodes hata:', e.message);
     }
@@ -259,8 +266,8 @@ async function refreshPlateMapping() {
   if (map.size > 0) {
     // İlk 3 eşleşmeyi göster
     let i = 0;
-    for (const [dev, pl] of map) {
-      console.log(`[Arvento]   ${dev} → ${pl}`);
+    for (const [dev, info] of map) {
+      console.log(`[Arvento]   ${dev} → ${info.plate}${info.group ? ` (${info.group})` : ''}`);
       if (++i >= 3) break;
     }
   }
@@ -279,8 +286,8 @@ async function fetchArventoPositions() {
 
   const xml = await arventoCallDebug('GetVehicleStatus', { Language: '1' });
 
-  // Response: her araç için bir <Table> bloğu
-  const rows = xml.split(/<Table[^>]*>/).slice(1);
+  // Response: her araç için bir <Table> veya <T diffgr:id="T1" ...> bloğu (Arvento sürüme göre değişir)
+  const rows = splitArventoRows(xml);
   const out = [];
   let skippedNoPlate = 0;
   let skippedNoDevice = 0;
@@ -315,7 +322,8 @@ async function fetchArventoPositions() {
 
     if (isNaN(lat) || isNaN(lng)) continue;
 
-    const plate = plateByDeviceNo.get(String(deviceNo).trim());
+    const entry = plateByDeviceNo.get(String(deviceNo).trim());
+    const plate = entry?.plate;
     if (!plate) {
       skippedNoPlate++;
       continue;
