@@ -1,6 +1,73 @@
 # CLAUDE.md — Proje Rehberi
 
-Bu dosya Claude Code için proje rehberidir. Her oturumun başında okunur. Kod yazmadan önce buradaki kurallara uy. Yapı: önce projenin teknik mimarisi (Code tarafından repo incelenerek çıkarıldı), sonra proje sahibiyle yapılan kararlar (sabit kurallar olarak uy).
+Bu dosya Claude Code için proje rehberidir. Her oturumun başında okunur. Kod yazmadan önce buradaki kurallara uy. Yapı:
+1. **Genel kurallar (Bekir, tüm projeler)** — Bekir'in çalışma tarzı, dil, ton, branch/commit politikası. Her projede geçerli.
+2. **Teknik mimari** — bu repo özelinde, kod incelenerek çıkarıldı.
+3. **Proje sahibiyle yapılan kararlar** — bu projeye özel sabit kurallar.
+
+Çakışma olursa proje-spesifik kurallar genel kuralların üzerine yazar (örn. bu projede stack ve dosya yapısı kararları proje bölümünde).
+
+---
+
+# 0. Genel Çalışma Kuralları (Bekir, tüm projelerde geçerli)
+
+## 0.1 Bağlam
+
+- Ben Bekir Arda — solo founder, kod yazmıyorum, ürün tarafına bakıyorum.
+- Claude'u "junior dev" değil, "iş ortağı" gibi kullanıyorum: ben ne istediğimi söylerim, sen yaparsın, ben onaylarım.
+- Hatalı bir iş yapmaktansa durup sormanı tercih ederim.
+
+## 0.2 Dil ve Ton
+
+1. **Türkçe konuş.** Her özet, açıklama, soru Türkçe olsun.
+2. **Ürün dilinde anlat, kod dilinde değil.** "Şu fonksiyonu değiştirdim" yerine "Şu özelliği değiştirdim, kullanıcı şunu fark eder" de.
+3. **Kod yapıştırma.** Ben kod okumuyorum. Sadece davranış değişikliğini anlat. İstediğim zaman "bana kodu göster" derim.
+4. **Emin değilsen sor, yapma.** Riskli işlerde mutlaka önce sor.
+
+## 0.3 İş Akışı
+
+Her görev için sıra:
+
+1. Değişikliği LOCAL'de yap (henüz commit veya push yok).
+2. Test edilebiliyorsa test et, edemiyorsan dürüstçe söyle ("local'de test karmaşık, push edip canlıda doğrulayalım mı?").
+3. Bana raporla — ne yaptığını ürün dilinde anlat.
+4. **Onay almadan ASLA commit etme.** Commit onaylanınca push'u sen yapabilirsin, ayrıca push onayı isteme.
+5. "Bozulmuş" dersem değişiklikleri `git checkout .` ile geri al.
+6. Push sonrası canlının ne zaman güncelleneceğini hatırlat.
+
+## 0.4 Branch ve Commit Kuralları
+
+- **Direkt main'e commit.** Feature branch (`claude/xxx` gibi) AÇMA.
+- **PR akışı kullanma.** Ben PR review yapmıyorum. Onayım yeterli güvenliktir.
+- Sadece "yeni branch aç" dersem aç.
+- **Commit mesajları İngilizce yaz** (uluslararası standart, GitHub okunaklılığı).
+- Format: `<type>: <ne değişti>`
+  - `fix:` bug düzeltmesi
+  - `feat:` yeni özellik
+  - `chore:` bakım, dependency, config
+  - `refactor:` davranış değişmeden kod düzeni
+  - `docs:` sadece doküman
+- "update files" gibi muğlak mesaj yazma. Net ve açıklayıcı olsun.
+
+## 0.5 Her Zaman Önce Sor
+
+Şu konularda ASLA tek başına karar verme, mutlaka onay al:
+
+- Auth / yetki / kullanıcı oturum sistemleri
+- Database schema, migration, RLS politikaları
+- `package.json` veya bağımlılık güncellemeleri
+- Routing veya deploy config dosyaları (`vercel.json`, `netlify.toml`, `next.config.js`, `vite.config.js` vb.)
+- Environment variable / API key / secret konuları
+- Dosya silme veya yeniden adlandırma
+- Birden fazla dosyayı etkileyen büyük refactor
+
+## 0.6 Yapma
+
+- "Daha temiz olur" diye refactor yapma — ben istemediysem dokunma.
+- Mevcut işleyen şeyleri kırma.
+- Test geçmediyse "tamamdır" deme.
+- Kendiliğinden dependency ekleme.
+- Hook'ları skip etme (`--no-verify` vb.) — ben özellikle söylemediysem.
 
 ---
 
@@ -195,13 +262,11 @@ npm run dev          # geliştirme: node --watch otomasyon.js
 - `.env.example` stale: hâlâ `ARVENTO_API_KEY` yazıyor, oysa `otomasyon.js` v2.3 `ARVENTO_USERNAME/PIN1/PIN2` istiyor. Yeni env değişikliği yaparken bu dosyayı da güncelle.
 - `zone_engine.js` repoda duruyor ama kullanılmıyor (otomasyon.js'in eski/REST varsayan versiyonu). v1'de elleme.
 
-## 2.7 Bekir'in çalışma tarzı (önemli)
-- Önce planla, sonra kod yaz. Karmaşık değişikliklerde önce ne yapacağını anlat.
+## 2.7 Bu projeye özel çalışma vurguları
+(Genel kurallar Bölüm 0'da. Buradaki maddeler projeye özel ek vurgu.)
+- Karmaşık değişikliklerde önce planı yaz, sonra kod.
 - Adım adım git. Madde bittikten sonra durup teyit bekle.
-- Varsayım yapma, belirsizlikte sor.
-- Hata olursa sessizce devam etme, dur ve söyle.
-- Kısa ve net konuş, dolduruşlu metin yazma.
-- Türkçe yorumlar ve UI metinleri.
+- Türkçe yorumlar, Türkçe UI metinleri (identifier'lar İngilizce).
 
 ## 2.8 Güvenlik (sıkı)
 - `.env`, `.env.local` ASLA commit edilmez
